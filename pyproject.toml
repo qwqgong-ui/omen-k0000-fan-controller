@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "hendricks-user-scheduler"
+version = "0.1.0"
+description = "User-space fan scheduler for HP Hendricks / board 8A4D"
+readme = "README_user_scheduler.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [{ name = "Hendricks user scheduler contributors" }]
+keywords = ["hp", "omen", "victus", "fan", "hwmon", "hp-wmi"]
+classifiers = [
+  "Environment :: Console",
+  "Intended Audience :: System Administrators",
+  "Operating System :: POSIX :: Linux",
+  "Programming Language :: Python :: 3",
+  "Topic :: System :: Hardware",
+]
+
+[project.scripts]
+hendricks-user-scheduler = "hendricks_user_scheduler.cli:main"
+
+[tool.setuptools]
+package-dir = { "" = "src" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+hendricks_user_scheduler = ["data/*.json"]

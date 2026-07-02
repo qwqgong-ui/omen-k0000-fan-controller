@@ -1,0 +1,14 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+
+# Local reference material used to derive the package. Do not publish the full
+# decompiled bundle by default.
+decompiled/
+exports/
+linux/
