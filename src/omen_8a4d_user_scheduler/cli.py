@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-User-space fan scheduler for HP Hendricks / board 8A4D machines.
+暗影精灵8A4D用户调度器。
 
 The scheduler consumes the OMEN Command Center platform JSON in this bundle and
 drives the Linux hp-wmi hwmon PWM interface. Fan table speeds are OEM units
@@ -516,7 +516,7 @@ def dump_curve(curve: FanCurve) -> None:
 
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="User-space HP Hendricks 8A4D fan scheduler"
+        description="暗影精灵8A4D用户调度器"
     )
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
     parser.add_argument(

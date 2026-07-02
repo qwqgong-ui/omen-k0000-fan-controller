@@ -1,11 +1,15 @@
 __pycache__/
 *.py[cod]
 *.egg-info/
+*.pkg.tar.*
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
 .venv/
 venv/
+dist/
+pkg/
+src/omen-8a4d-user-scheduler-*/
 
 # Local reference material used to derive the package. Do not publish the full
 # decompiled bundle by default.

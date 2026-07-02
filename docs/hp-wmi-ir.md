@@ -1,8 +1,8 @@
-# hp-wmi IR / surface sensor status
+# hp-wmi IR / 表面温度传感器状态
 
-## Runtime sysfs check
+## 当前 sysfs 检查结果
 
-On the tested 8A4D machine, Linux currently exposes:
+在这台 8A4D 机器上，Linux 当前只通过 `hp-wmi` 暴露了：
 
 ```text
 /sys/devices/platform/hp-wmi/hwmon/hwmon9/fan1_input
@@ -11,13 +11,11 @@ On the tested 8A4D machine, Linux currently exposes:
 /sys/devices/platform/hp-wmi/hwmon/hwmon9/pwm1_enable
 ```
 
-There is no `temp*_input` under the `hp` hwmon device. The available thermal
-zones are ACPI/CPU/wireless only; none is labeled IR, surface, skin, ambient, or
-board.
+`hp` hwmon 下面没有 `temp*_input`。`/sys/class/thermal` 里只有 ACPI、CPU 和无线网卡温度，没有 IR、surface、skin、ambient 或 board 之类的温度节点。
 
-## Windows command path
+## Windows 端命令路径
 
-The OMEN decompiled code reads platform sensors through:
+OMEN 反编译代码读取平台传感器时使用：
 
 ```csharp
 byte[] input = new byte[4] { index, 0, 0, 0 };
@@ -25,29 +23,22 @@ byte[] data = _omenHsaClient.BiosWmiCmd_GetSync(131080, 35, input, input.Length,
 return data[0];
 ```
 
-Index mapping in `PerformanceControlHelper.cs`:
+`PerformanceControlHelper.cs` 里的索引含义：
 
-- `0`: IR sensor, unless the platform switches IR to board sensor
-- `1`: ambient / board sensor
-- `2`: PCH sensor
-- `3`: VR sensor
+- `0`: IR 传感器，部分平台可能切到 board sensor
+- `1`: ambient / board 传感器
+- `2`: PCH 传感器
+- `3`: VR 传感器
 
-`131080` is `0x20008`, the `HPWMI_GM` WMI channel used by `linux/hp-wmi.c`.
-Command type `35` is `0x23`. The current `linux/hp-wmi.c` enum includes fan,
-GPU thermal mode, fan table, and power-limit commands, but does not include or
-export this sensor read command.
+`131080` 是 `0x20008`，也就是 `linux/hp-wmi.c` 里已有的 `HPWMI_GM` WMI 通道。命令类型 `35` 是 `0x23`。当前 `linux/hp-wmi.c` 已经有风扇、GPU thermal mode、风扇表和 power-limit 等 GM 命令，但没有实现或导出这个传感器读取命令。
 
-## Kernel interface likely needed
+## 可能需要补的内核接口
 
-To make IR available cleanly to user space, `hp-wmi` likely needs a new GM query
-wrapper for command type `0x23` and hwmon temperature channels, for example:
+如果要让用户态稳定读取 IR，`hp-wmi` 大概率需要新增 GM command type `0x23` 的查询包装，并注册 hwmon 温度通道，例如：
 
-- `temp1_input`: IR / surface sensor index `0`
-- optionally `temp2_input`: ambient / board sensor index `1`
-- optionally `temp3_input`: PCH sensor index `2`
-- optionally `temp4_input`: VR sensor index `3`
+- `temp1_input`: IR / surface，索引 `0`
+- 可选 `temp2_input`: ambient / board，索引 `1`
+- 可选 `temp3_input`: PCH，索引 `2`
+- 可选 `temp4_input`: VR，索引 `3`
 
-The exact upstreamable implementation should validate the command on supported
-boards and only expose channels that return sane values. Until that exists, this
-program defaults to CPU-only scheduling and leaves GPU/IR out of the control
-loop.
+真正 upstream 前需要按机型校验命令可用性，只暴露返回值合理的通道。在这个接口补齐前，暗影精灵8A4D用户调度器默认只使用 CPU 温度，不把 GPU/IR 纳入控制回路。

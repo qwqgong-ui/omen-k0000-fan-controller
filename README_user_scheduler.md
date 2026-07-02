@@ -1,6 +1,6 @@
-# Hendricks 8A4D 用户态风扇调度
+# 暗影精灵8A4D用户调度器
 
-这是一个可安装的 Python 程序包，用 HP OMEN Command Center 里的 Hendricks N20E 风扇表，在 Linux 用户态调度 HP 8A4D 机器的 `hp-wmi` 风扇 PWM。
+这是一个可安装的 Linux 用户态风扇调度程序，用暗影精灵 / OMEN 8A4D 机型对应的 Hendricks N20E 风扇表，通过 `hp-wmi` 的 hwmon PWM 接口控制风扇。
 
 默认策略：
 
@@ -11,66 +11,60 @@
 
 Linux `hp-wmi` 当前 PWM 模式值：
 
-- `pwm1_enable=0`: max fan
-- `pwm1_enable=1`: manual
-- `pwm1_enable=2`: automatic
+- `pwm1_enable=0`: 最大风扇
+- `pwm1_enable=1`: 手动 PWM
+- `pwm1_enable=2`: 自动模式
 
-## 安装
+## Arch / CachyOS 安装
 
-源码树直接运行：
+仓库根目录已经提供 `PKGBUILD`：
 
 ```bash
-python3 hendricks_user_scheduler.py --help
+makepkg -si
 ```
 
-安装为命令：
+安装后命令为：
 
 ```bash
-python3 -m pip install .
-hendricks-user-scheduler --help
+omen-8a4d-user-scheduler --help
 ```
 
-## 先 dry-run
+systemd 服务为：
 
 ```bash
-python3 hendricks_user_scheduler.py --dry-run --once --simulate CPU=82
+sudo systemctl enable --now omen-8a4d-user-scheduler.service
 ```
 
-看真实传感器和 hp-wmi 发现结果：
+## 源码树 dry-run
 
 ```bash
-sudo hendricks-user-scheduler --dry-run --once -v
+python3 omen_8a4d_user_scheduler.py --dry-run --once --simulate CPU=82
+```
+
+查看真实传感器和 `hp-wmi` 发现结果：
+
+```bash
+sudo omen-8a4d-user-scheduler --dry-run --once -v
 ```
 
 如果 CPU 传感器自动识别不准，可以手动指定：
 
 ```bash
-sudo hendricks-user-scheduler --dry-run --once \
+sudo omen-8a4d-user-scheduler --dry-run --once \
   --cpu-temp /sys/class/hwmon/hwmon7/temp1_input
 ```
 
 ## 实际运行
 
 ```bash
-sudo hendricks-user-scheduler --profile performance --sensors CPU
+sudo omen-8a4d-user-scheduler --profile performance --sensors CPU
 ```
 
 可选：同时切到内核平台性能配置：
 
 ```bash
-sudo hendricks-user-scheduler --profile performance --sensors CPU --platform-profile performance
+sudo omen-8a4d-user-scheduler --profile performance --sensors CPU --platform-profile performance
 ```
-
-## systemd
-
-```bash
-sudo python3 -m pip install .
-sudo cp systemd/hendricks-user-scheduler.service /etc/systemd/system/
-sudo systemctl daemon-reload
-sudo systemctl enable --now hendricks-user-scheduler.service
-```
-
-如果 `pip install .` 把命令安装到了别的路径，先改 service 里的 `ExecStart`。
 
 ## IR 状态
 

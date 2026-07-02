@@ -1,4 +1,5 @@
 include README_user_scheduler.md
-include systemd/hendricks-user-scheduler.service
+include bin/omen-8a4d-user-scheduler
+include systemd/omen-8a4d-user-scheduler.service
 include docs/*.md
-recursive-include src/hendricks_user_scheduler/data *.json
+recursive-include src/omen_8a4d_user_scheduler/data *.json
