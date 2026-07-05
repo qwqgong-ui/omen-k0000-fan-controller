@@ -4,7 +4,7 @@ After=multi-user.target
 
 [Service]
 Type=simple
-ExecStart=/usr/bin/omen-k0000-fan-controller --profile performance --sensors CPU,GPU --gpu-temp-policy active-only
+ExecStart=/usr/bin/omen-k0000-fan-controller --profile performance --sensors CPU,GPU,SPD --gpu-temp-policy active-only --spd-interval 10
 Restart=on-failure
 RestartSec=3
 

@@ -3,9 +3,9 @@
 omen-k0000-fan-controller。
 
 The scheduler consumes the OMEN Command Center platform JSON in this bundle and
-drives the Linux hp-wmi hwmon PWM interface. Fan table speeds are OEM units
-(hundreds of RPM); Linux exposes a 0..255 PWM value, so the writer scales the
-target speed against the loaded table maximum.
+drives the Linux hp-wmi hwmon PWM interface. Fan table values are firmware fan
+levels; Linux exposes a 0..255 PWM value, so the writer scales the target level
+against the loaded table maximum.
 """
 
 from __future__ import annotations
@@ -23,6 +23,8 @@ from typing import Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 ROOT = Path(__file__).resolve().parent
 DEFAULT_CONFIG = ROOT / "data/Hendricks_N20E.json"
+DEFAULT_SENSORS = ("CPU", "GPU", "SPD")
+DEFAULT_SPD_INTERVAL = 10.0
 
 PROFILE_TO_JSON_KEY = {
     "default": "SwFanControlCustomDefault",
@@ -30,7 +32,17 @@ PROFILE_TO_JSON_KEY = {
     "fan-curve": "SwFanControlCustomFanCurve",
 }
 
-SENSOR_ORDER = ("CPU", "GPU", "IR")
+SENSOR_ORDER = ("CPU", "GPU", "SPD", "IR")
+SPD_FAN_TABLE = [
+    (0, 21),
+    (55, 21),
+    (60, 24),
+    (65, 28),
+    (70, 33),
+    (75, 40),
+    (80, 50),
+    (85, 58),
+]
 
 
 @dataclass(frozen=True)
@@ -55,7 +67,7 @@ class FanCurve:
     lambda_decrease: float
     tables: Dict[str, List[Tuple[float, int]]]
     throttle_c: Optional[float]
-    max_speed: int
+    max_level: int
 
     @classmethod
     def from_platform_json(cls, path: Path, profile: str) -> "FanCurve":
@@ -79,7 +91,9 @@ class FanCurve:
                 fan_table["Fan_Table_IR_Fan_Speed_List"],
             ),
         }
-        speeds = [speed for table in tables.values() for _, speed in table]
+        profile_max_level = max(level for table in tables.values() for _, level in table)
+        tables["SPD"] = clamp_level_table(SPD_FAN_TABLE, profile_max_level)
+        levels = [level for table in tables.values() for _, level in table]
         throttle_key = (
             "temperatureThrottlingPerformance"
             if profile == "performance"
@@ -91,20 +105,20 @@ class FanCurve:
             lambda_decrease=float(block["Lamda_Decrease"]),
             tables=tables,
             throttle_c=float(data[throttle_key]) if throttle_key in data else None,
-            max_speed=max(speeds),
+            max_level=max(levels),
         )
 
     def target_for(self, sensor: str, temp_c: float) -> int:
         table = self.tables[sensor]
-        speed = table[0][1]
-        for threshold, next_speed in table:
+        level = table[0][1]
+        for threshold, next_level in table:
             if temp_c >= threshold:
-                speed = next_speed
+                level = next_level
             else:
                 break
-        return speed
+        return level
 
-    def target_speed(self, temps: Mapping[str, float]) -> Tuple[int, Dict[str, int]]:
+    def target_level(self, temps: Mapping[str, float]) -> Tuple[int, Dict[str, int]]:
         per_sensor: Dict[str, int] = {}
         for sensor in SENSOR_ORDER:
             if sensor in temps:
@@ -117,7 +131,7 @@ class FanCurve:
         if self.throttle_c is not None:
             cpu_temp = temps.get("CPU")
             if cpu_temp is not None and cpu_temp >= self.throttle_c:
-                target = self.max_speed
+                target = self.max_level
         return target, per_sensor
 
 
@@ -143,19 +157,23 @@ class EwmaFilter:
 class SensorReader:
     def __init__(
         self,
-        paths: Mapping[str, Optional[Path]],
+        paths: Mapping[str, Sequence[Path]],
         enabled: Sequence[str],
         gpu_temp_policy: str,
+        spd_interval: float,
         simulate: Optional[Mapping[str, float]] = None,
     ) -> None:
-        self.paths = paths
+        self.paths = {sensor: tuple(sensor_paths) for sensor, sensor_paths in paths.items()}
         self.enabled = tuple(enabled)
         self.gpu_temp_policy = gpu_temp_policy
-        self.gpu_runtime_status_path = find_runtime_status_for_path(paths.get("GPU"))
+        self.spd_interval = max(0.0, spd_interval)
+        self.gpu_runtime_status_path = find_runtime_status_for_paths(self.paths.get("GPU", ()))
         self.gpu_skip_logged = False
+        self.cached_readings: Dict[str, float] = {}
+        self.last_read_at: Dict[str, float] = {}
         self.simulate = dict(simulate) if simulate else None
 
-        if "GPU" in self.enabled and paths.get("GPU") is not None:
+        if "GPU" in self.enabled and self.paths.get("GPU"):
             if self.gpu_temp_policy == "active-only":
                 if self.gpu_runtime_status_path is not None:
                     logging.info(
@@ -165,6 +183,8 @@ class SensorReader:
                     logging.warning(
                         "GPU runtime status not found; GPU temperature reads will be skipped"
                     )
+        if "SPD" in self.enabled and self.paths.get("SPD") and self.spd_interval > 0:
+            logging.info("SPD temperature read interval: %.1fs", self.spd_interval)
 
     @classmethod
     def discover(
@@ -172,8 +192,10 @@ class SensorReader:
         enabled: Sequence[str],
         cpu_path: Optional[str],
         gpu_path: Optional[str],
+        spd_paths: Optional[Sequence[str]],
         ir_path: Optional[str],
         gpu_temp_policy: str,
+        spd_interval: float,
         simulate: Optional[Mapping[str, float]],
     ) -> "SensorReader":
         if simulate:
@@ -181,31 +203,43 @@ class SensorReader:
                 {},
                 enabled=enabled,
                 gpu_temp_policy=gpu_temp_policy,
+                spd_interval=spd_interval,
                 simulate=simulate,
             )
 
         discovered = discover_temperature_sensors()
         explicit = {
-            "CPU": Path(cpu_path) if cpu_path else None,
-            "GPU": Path(gpu_path) if gpu_path else None,
-            "IR": Path(ir_path) if ir_path else None,
+            "CPU": tuple([Path(cpu_path)]) if cpu_path else (),
+            "GPU": tuple([Path(gpu_path)]) if gpu_path else (),
+            "SPD": tuple(parse_path_list(spd_paths)),
+            "IR": tuple([Path(ir_path)]) if ir_path else (),
         }
-        paths: Dict[str, Optional[Path]] = {}
+        paths: Dict[str, Tuple[Path, ...]] = {}
         for sensor in enabled:
-            paths[sensor] = explicit[sensor] or discovered.get(sensor)
+            paths[sensor] = explicit[sensor] or discovered.get(sensor, ())
 
-        found = {key: path for key, path in paths.items() if path is not None}
+        found = {key: sensor_paths for key, sensor_paths in paths.items() if sensor_paths}
         if not found:
             raise RuntimeError(
                 "no enabled temperature sensors found; pass an explicit temp path or use --simulate"
             )
 
-        for sensor, path in found.items():
-            logging.info("using %s temperature sensor: %s", sensor, path)
-        missing = [sensor for sensor in enabled if paths.get(sensor) is None]
+        for sensor, sensor_paths in found.items():
+            logging.info(
+                "using %s temperature sensor%s: %s",
+                sensor,
+                "s" if len(sensor_paths) > 1 else "",
+                ", ".join(str(path) for path in sensor_paths),
+            )
+        missing = [sensor for sensor in enabled if not paths.get(sensor)]
         if missing:
             logging.warning("missing sensors will be ignored: %s", ", ".join(missing))
-        return cls(paths, enabled=enabled, gpu_temp_policy=gpu_temp_policy)
+        return cls(
+            paths,
+            enabled=enabled,
+            gpu_temp_policy=gpu_temp_policy,
+            spd_interval=spd_interval,
+        )
 
     def read(self) -> Dict[str, float]:
         if self.simulate is not None:
@@ -216,17 +250,39 @@ class SensorReader:
             }
 
         readings: Dict[str, float] = {}
-        for sensor, path in self.paths.items():
-            if path is None:
+        now = time.monotonic()
+        for sensor, sensor_paths in self.paths.items():
+            if not sensor_paths:
                 continue
             if sensor == "GPU" and self.gpu_temp_policy == "active-only":
                 if not self.gpu_is_runtime_active():
                     continue
-            try:
-                readings[sensor] = read_temp_c(path)
-            except OSError as exc:
-                logging.warning("failed to read %s from %s: %s", sensor, path, exc)
+            if sensor == "SPD" and not self.should_read_spd(now):
+                readings[sensor] = self.cached_readings[sensor]
+                continue
+            values: List[float] = []
+            failed_paths: List[str] = []
+            for path in sensor_paths:
+                try:
+                    values.append(read_temp_c(path))
+                except OSError as exc:
+                    failed_paths.append(f"{path}: {exc}")
+            if values:
+                value = max(values)
+                readings[sensor] = value
+                if sensor == "SPD":
+                    self.cached_readings[sensor] = value
+                    self.last_read_at[sensor] = now
+            elif sensor == "SPD" and sensor in self.cached_readings:
+                readings[sensor] = self.cached_readings[sensor]
+            for failed_path in failed_paths:
+                logging.warning("failed to read %s from %s", sensor, failed_path)
         return readings
+
+    def should_read_spd(self, now: float) -> bool:
+        if self.spd_interval <= 0 or "SPD" not in self.cached_readings:
+            return True
+        return now - self.last_read_at.get("SPD", 0.0) >= self.spd_interval
 
     def gpu_is_runtime_active(self) -> bool:
         if self.gpu_runtime_status_path is None:
@@ -251,13 +307,13 @@ class FanWriter:
         self,
         pwm_path: Optional[Path],
         pwm_enable_path: Optional[Path],
-        max_speed: int,
+        max_level: int,
         dry_run: bool,
         restore_auto: bool,
     ) -> None:
         self.pwm_path = pwm_path
         self.pwm_enable_path = pwm_enable_path
-        self.max_speed = max_speed
+        self.max_level = max_level
         self.dry_run = dry_run
         self.restore_auto = restore_auto
         self.last_pwm: Optional[int] = None
@@ -269,7 +325,7 @@ class FanWriter:
         hwmon: Optional[str],
         pwm: Optional[str],
         pwm_enable: Optional[str],
-        max_speed: int,
+        max_level: int,
         dry_run: bool,
         restore_auto: bool,
     ) -> "FanWriter":
@@ -288,22 +344,22 @@ class FanWriter:
         if pwm_path is None or enable_path is None:
             if dry_run:
                 logging.warning("hp-wmi PWM not found; dry-run will only print decisions")
-                return cls(None, None, max_speed, dry_run, restore_auto)
+                return cls(None, None, max_level, dry_run, restore_auto)
             raise RuntimeError(
                 "hp-wmi PWM not found; ensure the kernel hp-wmi hwmon support is loaded"
             )
 
         logging.info("using fan PWM: %s", pwm_path)
         logging.info("using fan PWM mode: %s", enable_path)
-        return cls(pwm_path, enable_path, max_speed, dry_run, restore_auto)
+        return cls(pwm_path, enable_path, max_level, dry_run, restore_auto)
 
-    def apply_speed(self, speed: int) -> int:
-        clamped = max(0, min(speed, self.max_speed))
-        pwm = round((clamped / self.max_speed) * 255) if self.max_speed > 0 else 0
+    def apply_level(self, level: int) -> int:
+        clamped = max(0, min(level, self.max_level))
+        pwm = round((clamped / self.max_level) * 255) if self.max_level > 0 else 0
         pwm = max(0, min(pwm, 255))
 
         if self.dry_run:
-            logging.info("dry-run: target speed=%s pwm=%s", clamped, pwm)
+            logging.info("dry-run: target level=%s pwm=%s", clamped, pwm)
             self.last_pwm = pwm
             return pwm
 
@@ -369,7 +425,7 @@ class Scheduler:
         self.filter = EwmaFilter(curve.lambda_increase, curve.lambda_decrease)
         self.log_every = log_every
         self.ticks = 0
-        self.last_speed: Optional[int] = None
+        self.last_level: Optional[int] = None
 
     def tick(self) -> SensorReading:
         raw = self.reader.read()
@@ -377,29 +433,35 @@ class Scheduler:
             raise RuntimeError("all temperature sensor reads failed")
 
         smoothed = self.filter.update(raw)
-        speed, per_sensor = self.curve.target_speed(smoothed)
-        pwm = self.writer.apply_speed(speed)
+        level, per_sensor = self.curve.target_level(smoothed)
+        pwm = self.writer.apply_level(level)
 
-        changed = speed != self.last_speed
+        changed = level != self.last_level
         should_log = changed or self.ticks % self.log_every == 0
         if should_log:
             logging.info(
-                "temps raw=%s ewma=%s per_sensor=%s target_speed=%s pwm=%s",
+                "temps raw=%s ewma=%s per_sensor=%s target_level=%s pwm=%s",
                 format_float_map(raw),
                 format_float_map(smoothed),
                 per_sensor,
-                speed,
+                level,
                 pwm,
             )
-        self.last_speed = speed
+        self.last_level = level
         self.ticks += 1
         return SensorReading(raw=raw, smoothed=smoothed)
 
 
-def pair_table(temps: Sequence[float], speeds: Sequence[int]) -> List[Tuple[float, int]]:
-    if len(temps) != len(speeds):
-        raise ValueError("temperature and fan-speed lists have different lengths")
-    return sorted((float(temp), int(speed)) for temp, speed in zip(temps, speeds))
+def pair_table(temps: Sequence[float], levels: Sequence[int]) -> List[Tuple[float, int]]:
+    if len(temps) != len(levels):
+        raise ValueError("temperature and fan-level lists have different lengths")
+    return sorted((float(temp), int(level)) for temp, level in zip(temps, levels))
+
+
+def clamp_level_table(
+    table: Sequence[Tuple[float, int]], max_level: int
+) -> List[Tuple[float, int]]:
+    return sorted((float(temp), min(int(level), max_level)) for temp, level in table)
 
 
 def read_temp_c(path: Path) -> float:
@@ -411,10 +473,15 @@ def write_text(path: Path, text: str) -> None:
     path.write_text(text, encoding="utf-8")
 
 
-def find_runtime_status_for_path(path: Optional[Path]) -> Optional[Path]:
-    if path is None:
-        return None
+def find_runtime_status_for_paths(paths: Sequence[Path]) -> Optional[Path]:
+    for path in paths:
+        runtime_status = find_runtime_status_for_path(path)
+        if runtime_status is not None:
+            return runtime_status
+    return None
 
+
+def find_runtime_status_for_path(path: Path) -> Optional[Path]:
     try:
         resolved = path.resolve()
     except OSError:
@@ -435,7 +502,7 @@ def find_runtime_status_for_path(path: Optional[Path]) -> Optional[Path]:
     return fallback
 
 
-def discover_temperature_sensors() -> Dict[str, Path]:
+def discover_temperature_sensors() -> Dict[str, Tuple[Path, ...]]:
     candidates: Dict[str, List[SensorCandidate]] = {sensor: [] for sensor in SENSOR_ORDER}
     for hwmon in Path("/sys/class/hwmon").glob("hwmon*"):
         name = read_optional_text(hwmon / "name").lower()
@@ -445,12 +512,17 @@ def discover_temperature_sensors() -> Dict[str, Path]:
             for candidate in score_temperature_candidate(name, label, input_path):
                 candidates[candidate.kind].append(candidate)
 
-    result: Dict[str, Path] = {}
+    result: Dict[str, Tuple[Path, ...]] = {}
     for sensor, sensor_candidates in candidates.items():
         if not sensor_candidates:
             continue
+        if sensor == "SPD":
+            selected = tuple(sorted(candidate.path for candidate in sensor_candidates))
+            result[sensor] = selected
+            logging.debug("selected SPD temp candidates: %s", selected)
+            continue
         best = max(sensor_candidates, key=lambda item: item.score)
-        result[sensor] = best.path
+        result[sensor] = (best.path,)
         logging.debug(
             "selected %s temp candidate: %s name=%s label=%s score=%s",
             sensor,
@@ -487,6 +559,14 @@ def score_temperature_candidate(
     if gpu_score:
         yield SensorCandidate("GPU", path, gpu_score, name, label)
 
+    spd_score = 0
+    if name == "spd5118":
+        spd_score += 80
+    if "spd" in text or "dimm" in text or "memory" in text:
+        spd_score += 30
+    if spd_score:
+        yield SensorCandidate("SPD", path, spd_score, name, label)
+
     ir_score = 0
     if any(token in text for token in ("ir", "surface", "skin", "ambient")):
         ir_score += 70
@@ -519,7 +599,7 @@ def parse_simulate(value: Optional[str]) -> Optional[Dict[str, float]]:
             continue
         if "=" not in part:
             raise argparse.ArgumentTypeError(
-                "simulate entries must look like CPU=80,GPU=70,IR=42"
+                "simulate entries must look like CPU=80,GPU=70,SPD=55,IR=42"
             )
         key, raw_temp = part.split("=", 1)
         sensor = key.strip().upper()
@@ -529,6 +609,18 @@ def parse_simulate(value: Optional[str]) -> Optional[Dict[str, float]]:
     if not result:
         raise argparse.ArgumentTypeError("no simulated temperatures supplied")
     return result
+
+
+def parse_path_list(values: Optional[Sequence[str]]) -> List[Path]:
+    paths: List[Path] = []
+    if not values:
+        return paths
+    for value in values:
+        for part in value.split(","):
+            path = part.strip()
+            if path:
+                paths.append(Path(path))
+    return paths
 
 
 def parse_sensors(value: str) -> Tuple[str, ...]:
@@ -572,11 +664,11 @@ def dump_curve(curve: FanCurve) -> None:
     print(f"lambda_increase: {curve.lambda_increase}")
     print(f"lambda_decrease: {curve.lambda_decrease}")
     print(f"throttle_c: {curve.throttle_c}")
-    print(f"max_speed: {curve.max_speed}")
+    print(f"max_level: {curve.max_level}")
     for sensor in SENSOR_ORDER:
         print(sensor)
-        for temp, speed in curve.tables[sensor]:
-            print(f"  {temp:g} C -> {speed}")
+        for temp, level in curve.tables[sensor]:
+            print(f"  {temp:g} C -> {level}")
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -597,16 +689,30 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--sensors",
         type=parse_sensors,
-        default=("CPU", "GPU"),
-        help="comma-separated sensors to monitor: CPU, GPU, IR, or ALL; default: CPU,GPU",
+        default=DEFAULT_SENSORS,
+        help=(
+            "comma-separated sensors to monitor: CPU, GPU, SPD, IR, or ALL; "
+            "default: CPU,GPU,SPD"
+        ),
     )
     parser.add_argument(
         "--simulate",
         type=parse_simulate,
-        help="skip sysfs sensors and use values like CPU=80,GPU=70,IR=42",
+        help="skip sysfs sensors and use values like CPU=80,GPU=70,SPD=55,IR=42",
     )
     parser.add_argument("--cpu-temp", help="explicit CPU temp*_input sysfs path")
     parser.add_argument("--gpu-temp", help="explicit GPU temp*_input sysfs path")
+    parser.add_argument(
+        "--spd-temp",
+        action="append",
+        help="explicit SPD temp*_input sysfs path; may be repeated or comma-separated",
+    )
+    parser.add_argument(
+        "--spd-interval",
+        type=float,
+        default=DEFAULT_SPD_INTERVAL,
+        help="minimum seconds between SPD temperature reads; default: 10",
+    )
     parser.add_argument(
         "--gpu-temp-policy",
         choices=("active-only", "always"),
@@ -618,9 +724,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--pwm", help="explicit pwm1 path")
     parser.add_argument("--pwm-enable", help="explicit pwm1_enable path")
     parser.add_argument(
-        "--fan-speed-max",
+        "--fan-level-max",
         type=int,
-        help="OEM fan speed value that maps to PWM 255; defaults to table maximum",
+        help="fan table level that maps to PWM 255; defaults to table maximum",
     )
     parser.add_argument(
         "--platform-profile",
@@ -659,20 +765,22 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     check_board(args.ignore_board, args.dry_run)
     PlatformProfile(args.platform_profile, args.dry_run).apply()
 
-    max_speed = args.fan_speed_max or curve.max_speed
+    max_level = args.fan_level_max or curve.max_level
     reader = SensorReader.discover(
         args.sensors,
         args.cpu_temp,
         args.gpu_temp,
+        args.spd_temp,
         args.ir_temp,
         gpu_temp_policy=args.gpu_temp_policy,
+        spd_interval=args.spd_interval,
         simulate=args.simulate,
     )
     writer = FanWriter.discover(
         args.hwmon,
         args.pwm,
         args.pwm_enable,
-        max_speed=max_speed,
+        max_level=max_level,
         dry_run=args.dry_run,
         restore_auto=not args.no_restore_auto,
     )

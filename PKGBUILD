@@ -2,7 +2,7 @@
 
 pkgname=omen-k0000-fan-controller
 pkgver=0.1.0
-pkgrel=1
+pkgrel=2
 pkgdesc='omen-k0000-fan-controller'
 arch=('any')
 url='https://github.com/qwqgong-ui/omen-k0000-fan-controller'
@@ -11,7 +11,7 @@ depends=('python')
 conflicts=('omen-8a4d-user-scheduler')
 replaces=('omen-8a4d-user-scheduler')
 source=("${pkgname}-${pkgver}.tar.gz")
-sha256sums=('20f598d3e60d951c771286914c7fbf04cc813969b58fc352a04ebcdcfee3c4f1')
+sha256sums=('13f03ec7f228bd103bb9500eb9a141cb5a7e9133a54c412c14e3d684d64d513e')
 
 package() {
   cd "${srcdir}/${pkgname}-${pkgver}"
