@@ -1,0 +1,12 @@
+[Unit]
+Description=omen-k0000-fan-controller
+After=multi-user.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/omen-k0000-fan-controller --profile performance --sensors CPU,GPU --gpu-temp-policy active-only
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

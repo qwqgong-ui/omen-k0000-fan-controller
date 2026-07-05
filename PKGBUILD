@@ -1,15 +1,17 @@
 # Maintainer: qwqgong-ui <qwqgong-ui@users.noreply.github.com>
 
-pkgname=omen-8a4d-user-scheduler
+pkgname=omen-k0000-fan-controller
 pkgver=0.1.0
 pkgrel=1
-pkgdesc='暗影精灵8A4D用户调度器'
+pkgdesc='omen-k0000-fan-controller'
 arch=('any')
-url='https://github.com/qwqgong-ui/omen-8a4d-user-scheduler'
+url='https://github.com/qwqgong-ui/omen-k0000-fan-controller'
 license=('MIT')
 depends=('python')
+conflicts=('omen-8a4d-user-scheduler')
+replaces=('omen-8a4d-user-scheduler')
 source=("${pkgname}-${pkgver}.tar.gz")
-sha256sums=('9e277539815d943d45a0d8714ca7b93f2bbae4def5d91ff44b75416b579466f7')
+sha256sums=('20f598d3e60d951c771286914c7fbf04cc813969b58fc352a04ebcdcfee3c4f1')
 
 package() {
   cd "${srcdir}/${pkgname}-${pkgver}"
@@ -22,12 +24,12 @@ PY
 )"
 
   install -dm755 "${pkgdir}/${site_packages}"
-  cp -a src/omen_8a4d_user_scheduler "${pkgdir}/${site_packages}/"
+  cp -a src/omen_k0000_fan_controller "${pkgdir}/${site_packages}/"
 
-  install -Dm755 bin/omen-8a4d-user-scheduler \
-    "${pkgdir}/usr/bin/omen-8a4d-user-scheduler"
-  install -Dm644 systemd/omen-8a4d-user-scheduler.service \
-    "${pkgdir}/usr/lib/systemd/system/omen-8a4d-user-scheduler.service"
+  install -Dm755 bin/omen-k0000-fan-controller \
+    "${pkgdir}/usr/bin/omen-k0000-fan-controller"
+  install -Dm644 systemd/omen-k0000-fan-controller.service \
+    "${pkgdir}/usr/lib/systemd/system/omen-k0000-fan-controller.service"
   install -Dm644 LICENSE \
     "${pkgdir}/usr/share/licenses/${pkgname}/LICENSE"
   install -Dm644 README_user_scheduler.md \

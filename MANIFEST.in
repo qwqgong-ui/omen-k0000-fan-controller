@@ -1,5 +1,5 @@
 include README_user_scheduler.md
-include bin/omen-8a4d-user-scheduler
-include systemd/omen-8a4d-user-scheduler.service
+include bin/omen-k0000-fan-controller
+include systemd/omen-k0000-fan-controller.service
 include docs/*.md
-recursive-include src/omen_8a4d_user_scheduler/data *.json
+recursive-include src/omen_k0000_fan_controller/data *.json

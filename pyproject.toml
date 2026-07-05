@@ -3,13 +3,13 @@ requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "omen-8a4d-user-scheduler"
+name = "omen-k0000-fan-controller"
 version = "0.1.0"
-description = "暗影精灵8A4D用户调度器"
+description = "omen-k0000-fan-controller"
 readme = "README_user_scheduler.md"
 requires-python = ">=3.9"
 license = { text = "MIT" }
-authors = [{ name = "暗影精灵8A4D用户调度器 contributors" }]
+authors = [{ name = "omen-k0000-fan-controller contributors" }]
 keywords = ["hp", "omen", "victus", "fan", "hwmon", "hp-wmi", "8a4d"]
 classifiers = [
   "Environment :: Console",
@@ -20,7 +20,7 @@ classifiers = [
 ]
 
 [project.scripts]
-omen-8a4d-user-scheduler = "omen_8a4d_user_scheduler.cli:main"
+omen-k0000-fan-controller = "omen_k0000_fan_controller.cli:main"
 
 [tool.setuptools]
 package-dir = { "" = "src" }
@@ -29,4 +29,4 @@ package-dir = { "" = "src" }
 where = ["src"]
 
 [tool.setuptools.package-data]
-omen_8a4d_user_scheduler = ["data/*.json"]
+omen_k0000_fan_controller = ["data/*.json"]

@@ -41,4 +41,4 @@ return data[0];
 - 可选 `temp3_input`: PCH，索引 `2`
 - 可选 `temp4_input`: VR，索引 `3`
 
-真正 upstream 前需要按机型校验命令可用性，只暴露返回值合理的通道。在这个接口补齐前，暗影精灵8A4D用户调度器默认只使用 CPU 温度，不把 GPU/IR 纳入控制回路。
+真正 upstream 前需要按机型校验命令可用性，只暴露返回值合理的通道。在这个接口补齐前，omen-k0000-fan-controller默认使用 CPU 和 GPU；其中 GPU 只在 dGPU 已经 `runtime_status=active` 时读取温度，避免唤醒 D3/suspended 状态。

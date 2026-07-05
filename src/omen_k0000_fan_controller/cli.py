@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-暗影精灵8A4D用户调度器。
+omen-k0000-fan-controller。
 
 The scheduler consumes the OMEN Command Center platform JSON in this bundle and
 drives the Linux hp-wmi hwmon PWM interface. Fan table speeds are OEM units
@@ -145,11 +145,26 @@ class SensorReader:
         self,
         paths: Mapping[str, Optional[Path]],
         enabled: Sequence[str],
+        gpu_temp_policy: str,
         simulate: Optional[Mapping[str, float]] = None,
     ) -> None:
         self.paths = paths
         self.enabled = tuple(enabled)
+        self.gpu_temp_policy = gpu_temp_policy
+        self.gpu_runtime_status_path = find_runtime_status_for_path(paths.get("GPU"))
+        self.gpu_skip_logged = False
         self.simulate = dict(simulate) if simulate else None
+
+        if "GPU" in self.enabled and paths.get("GPU") is not None:
+            if self.gpu_temp_policy == "active-only":
+                if self.gpu_runtime_status_path is not None:
+                    logging.info(
+                        "using GPU runtime status: %s", self.gpu_runtime_status_path
+                    )
+                else:
+                    logging.warning(
+                        "GPU runtime status not found; GPU temperature reads will be skipped"
+                    )
 
     @classmethod
     def discover(
@@ -158,10 +173,16 @@ class SensorReader:
         cpu_path: Optional[str],
         gpu_path: Optional[str],
         ir_path: Optional[str],
+        gpu_temp_policy: str,
         simulate: Optional[Mapping[str, float]],
     ) -> "SensorReader":
         if simulate:
-            return cls({}, enabled=enabled, simulate=simulate)
+            return cls(
+                {},
+                enabled=enabled,
+                gpu_temp_policy=gpu_temp_policy,
+                simulate=simulate,
+            )
 
         discovered = discover_temperature_sensors()
         explicit = {
@@ -184,7 +205,7 @@ class SensorReader:
         missing = [sensor for sensor in enabled if paths.get(sensor) is None]
         if missing:
             logging.warning("missing sensors will be ignored: %s", ", ".join(missing))
-        return cls(paths, enabled=enabled)
+        return cls(paths, enabled=enabled, gpu_temp_policy=gpu_temp_policy)
 
     def read(self) -> Dict[str, float]:
         if self.simulate is not None:
@@ -198,11 +219,31 @@ class SensorReader:
         for sensor, path in self.paths.items():
             if path is None:
                 continue
+            if sensor == "GPU" and self.gpu_temp_policy == "active-only":
+                if not self.gpu_is_runtime_active():
+                    continue
             try:
                 readings[sensor] = read_temp_c(path)
             except OSError as exc:
                 logging.warning("failed to read %s from %s: %s", sensor, path, exc)
         return readings
+
+    def gpu_is_runtime_active(self) -> bool:
+        if self.gpu_runtime_status_path is None:
+            if not self.gpu_skip_logged:
+                logging.debug("skipping GPU temperature read: no runtime_status path")
+                self.gpu_skip_logged = True
+            return False
+
+        status = read_optional_text(self.gpu_runtime_status_path)
+        if status == "active":
+            self.gpu_skip_logged = False
+            return True
+
+        if not self.gpu_skip_logged:
+            logging.debug("skipping GPU temperature read: runtime_status=%s", status)
+            self.gpu_skip_logged = True
+        return False
 
 
 class FanWriter:
@@ -370,6 +411,30 @@ def write_text(path: Path, text: str) -> None:
     path.write_text(text, encoding="utf-8")
 
 
+def find_runtime_status_for_path(path: Optional[Path]) -> Optional[Path]:
+    if path is None:
+        return None
+
+    try:
+        resolved = path.resolve()
+    except OSError:
+        return None
+
+    fallback: Optional[Path] = None
+    for parent in (resolved, *resolved.parents):
+        runtime_status = parent / "power/runtime_status"
+        if not runtime_status.exists():
+            continue
+        if fallback is None:
+            fallback = runtime_status
+
+        pci_class = read_optional_text(parent / "class").lower()
+        if pci_class.startswith("0x03"):
+            return runtime_status
+
+    return fallback
+
+
 def discover_temperature_sensors() -> Dict[str, Path]:
     candidates: Dict[str, List[SensorCandidate]] = {sensor: [] for sensor in SENSOR_ORDER}
     for hwmon in Path("/sys/class/hwmon").glob("hwmon*"):
@@ -516,7 +581,7 @@ def dump_curve(curve: FanCurve) -> None:
 
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="暗影精灵8A4D用户调度器"
+        description="omen-k0000-fan-controller"
     )
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
     parser.add_argument(
@@ -532,8 +597,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--sensors",
         type=parse_sensors,
-        default=("CPU",),
-        help="comma-separated sensors to monitor: CPU, GPU, IR, or ALL; default: CPU",
+        default=("CPU", "GPU"),
+        help="comma-separated sensors to monitor: CPU, GPU, IR, or ALL; default: CPU,GPU",
     )
     parser.add_argument(
         "--simulate",
@@ -542,6 +607,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--cpu-temp", help="explicit CPU temp*_input sysfs path")
     parser.add_argument("--gpu-temp", help="explicit GPU temp*_input sysfs path")
+    parser.add_argument(
+        "--gpu-temp-policy",
+        choices=("active-only", "always"),
+        default="active-only",
+        help="read GPU temperature only when runtime_status is active, or always",
+    )
     parser.add_argument("--ir-temp", help="explicit IR/surface temp*_input sysfs path")
     parser.add_argument("--hwmon", help="explicit hp hwmon directory")
     parser.add_argument("--pwm", help="explicit pwm1 path")
@@ -594,6 +665,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         args.cpu_temp,
         args.gpu_temp,
         args.ir_temp,
+        gpu_temp_policy=args.gpu_temp_policy,
         simulate=args.simulate,
     )
     writer = FanWriter.discover(

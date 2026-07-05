@@ -1,5 +1,5 @@
 #!/usr/bin/python
-from omen_8a4d_user_scheduler.cli import main
+from omen_k0000_fan_controller.cli import main
 
 
 if __name__ == "__main__":
