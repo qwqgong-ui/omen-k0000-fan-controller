@@ -113,7 +113,7 @@ Windows 反编译代码里 IR 通过 `BiosWmiCmd_GetSync(131080, 35, ...)` 获�
 2. 使用 JSON 里的 `Lamda_Increase` / `Lamda_Decrease` 做非对称 EWMA 平滑。
 3. 查所选 profile 的风扇表，取启用传感器对应目标档位中的最高值。
 4. 将目标档位按表内最大档位映射为 `0..255` PWM。
-5. 写入 `pwm1_enable=1` 和 `pwm1`。
+5. 升速立即写入；降速默认延迟 0.5 秒后写入 `pwm1_enable=1` 和 `pwm1`。
 
 默认周期是 1 秒，对应 OEM 配置里的 `IntervalAlgoShort=1000`。
 
@@ -125,6 +125,7 @@ Windows 反编译代码里 IR 通过 `BiosWmiCmd_GetSync(131080, 35, ...)` 获�
 - `--spd-temp PATH`: 手动指定 SPD `temp*_input`，可以重复传入或用逗号分隔。
 - `--spd-interval 10`: SPD 温度最小读取间隔秒数，默认 10 秒。
 - `--interval 1.0`: 调度周期秒数。
+- `--decrease-delay 0.5`: PWM 降速前等待秒数，默认 0.5；升速不延迟。
 - `--fan-level-max 58`: 指定最大档位到 PWM 255 的映射，默认用所选表最大值。
 - `--no-restore-auto`: 退出时不恢复 `pwm1_enable=2`。
 - `--ignore-board`: 非 8A4D 主板也强制运行。

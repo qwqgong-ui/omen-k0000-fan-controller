@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "omen-k0000-fan-controller"
-version = "0.1.0"
+version = "0.1.1"
 description = "omen-k0000-fan-controller"
 readme = "README_user_scheduler.md"
 requires-python = ">=3.9"

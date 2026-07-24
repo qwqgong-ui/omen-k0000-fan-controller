@@ -25,6 +25,7 @@ ROOT = Path(__file__).resolve().parent
 DEFAULT_CONFIG = ROOT / "data/Hendricks_N20E.json"
 DEFAULT_SENSORS = ("CPU", "GPU", "SPD")
 DEFAULT_SPD_INTERVAL = 10.0
+DEFAULT_DECREASE_DELAY = 0.5
 
 PROFILE_TO_JSON_KEY = {
     "default": "SwFanControlCustomDefault",
@@ -310,12 +311,14 @@ class FanWriter:
         max_level: int,
         dry_run: bool,
         restore_auto: bool,
+        decrease_delay: float = DEFAULT_DECREASE_DELAY,
     ) -> None:
         self.pwm_path = pwm_path
         self.pwm_enable_path = pwm_enable_path
         self.max_level = max_level
         self.dry_run = dry_run
         self.restore_auto = restore_auto
+        self.decrease_delay = max(0.0, decrease_delay)
         self.last_pwm: Optional[int] = None
         self.manual_enabled = False
 
@@ -328,6 +331,7 @@ class FanWriter:
         max_level: int,
         dry_run: bool,
         restore_auto: bool,
+        decrease_delay: float = DEFAULT_DECREASE_DELAY,
     ) -> "FanWriter":
         pwm_path = Path(pwm) if pwm else None
         enable_path = Path(pwm_enable) if pwm_enable else None
@@ -344,14 +348,28 @@ class FanWriter:
         if pwm_path is None or enable_path is None:
             if dry_run:
                 logging.warning("hp-wmi PWM not found; dry-run will only print decisions")
-                return cls(None, None, max_level, dry_run, restore_auto)
+                return cls(
+                    None,
+                    None,
+                    max_level,
+                    dry_run,
+                    restore_auto,
+                    decrease_delay,
+                )
             raise RuntimeError(
                 "hp-wmi PWM not found; ensure the kernel hp-wmi hwmon support is loaded"
             )
 
         logging.info("using fan PWM: %s", pwm_path)
         logging.info("using fan PWM mode: %s", enable_path)
-        return cls(pwm_path, enable_path, max_level, dry_run, restore_auto)
+        return cls(
+            pwm_path,
+            enable_path,
+            max_level,
+            dry_run,
+            restore_auto,
+            decrease_delay,
+        )
 
     def apply_level(self, level: int) -> int:
         clamped = max(0, min(level, self.max_level))
@@ -369,6 +387,18 @@ class FanWriter:
             write_text(self.pwm_enable_path, "1\n")
             self.manual_enabled = True
         if pwm != self.last_pwm:
+            if (
+                self.last_pwm is not None
+                and pwm < self.last_pwm
+                and self.decrease_delay > 0
+            ):
+                logging.debug(
+                    "delaying fan decrease by %.3fs: pwm %s -> %s",
+                    self.decrease_delay,
+                    self.last_pwm,
+                    pwm,
+                )
+                time.sleep(self.decrease_delay)
             write_text(self.pwm_path, f"{pwm}\n")
             self.last_pwm = pwm
         return pwm
@@ -683,6 +713,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="fan table profile loaded from the OMEN platform JSON",
     )
     parser.add_argument("--interval", type=float, default=1.0)
+    parser.add_argument(
+        "--decrease-delay",
+        type=float,
+        default=DEFAULT_DECREASE_DELAY,
+        help="seconds to wait before lowering PWM; default: 0.5",
+    )
     parser.add_argument("--once", action="store_true", help="run a single scheduler tick")
     parser.add_argument("--dry-run", action="store_true", help="do not write sysfs")
     parser.add_argument("--dump-curve", action="store_true", help="print the loaded curve")
@@ -783,6 +819,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         max_level=max_level,
         dry_run=args.dry_run,
         restore_auto=not args.no_restore_auto,
+        decrease_delay=args.decrease_delay,
     )
     scheduler = Scheduler(curve, reader, writer, log_every=max(1, args.log_every))
 
