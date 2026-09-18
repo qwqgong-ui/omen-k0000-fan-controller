@@ -18,7 +18,7 @@ import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
+from typing import Dict, Iterable, List, Mapping, Optional, Sequence, Tuple, Union
 
 
 ROOT = Path(__file__).resolve().parent
@@ -306,14 +306,19 @@ class SensorReader:
 class FanWriter:
     def __init__(
         self,
-        pwm_path: Optional[Path],
+        pwm_path: Union[Path, Sequence[Path], None],
         pwm_enable_path: Optional[Path],
         max_level: int,
         dry_run: bool,
         restore_auto: bool,
         decrease_delay: float = DEFAULT_DECREASE_DELAY,
     ) -> None:
-        self.pwm_path = pwm_path
+        if pwm_path is None:
+            self.pwm_paths: Tuple[Path, ...] = ()
+        elif isinstance(pwm_path, Path):
+            self.pwm_paths = (pwm_path,)
+        else:
+            self.pwm_paths = tuple(pwm_path)
         self.pwm_enable_path = pwm_enable_path
         self.max_level = max_level
         self.dry_run = dry_run
@@ -333,19 +338,26 @@ class FanWriter:
         restore_auto: bool,
         decrease_delay: float = DEFAULT_DECREASE_DELAY,
     ) -> "FanWriter":
-        pwm_path = Path(pwm) if pwm else None
+        pwm_paths = (
+            tuple(Path(part.strip()) for part in pwm.split(",") if part.strip())
+            if pwm
+            else ()
+        )
         enable_path = Path(pwm_enable) if pwm_enable else None
 
-        if (pwm_path is None) != (enable_path is None):
+        if pwm is not None and not pwm_paths:
+            raise RuntimeError("--pwm was supplied without a path")
+
+        if bool(pwm_paths) != (enable_path is not None):
             raise RuntimeError("--pwm and --pwm-enable must be supplied together")
 
-        if pwm_path is None:
+        if not pwm_paths:
             hwmon_path = Path(hwmon) if hwmon else find_hp_hwmon()
             if hwmon_path is not None:
-                pwm_path = hwmon_path / "pwm1"
+                pwm_paths = find_pwm_paths(hwmon_path)
                 enable_path = hwmon_path / "pwm1_enable"
 
-        if pwm_path is None or enable_path is None:
+        if not pwm_paths or enable_path is None:
             if dry_run:
                 logging.warning("hp-wmi PWM not found; dry-run will only print decisions")
                 return cls(
@@ -360,10 +372,12 @@ class FanWriter:
                 "hp-wmi PWM not found; ensure the kernel hp-wmi hwmon support is loaded"
             )
 
-        logging.info("using fan PWM: %s", pwm_path)
+        logging.info(
+            "using fan PWM: %s", ", ".join(str(path) for path in pwm_paths)
+        )
         logging.info("using fan PWM mode: %s", enable_path)
         return cls(
-            pwm_path,
+            pwm_paths,
             enable_path,
             max_level,
             dry_run,
@@ -381,7 +395,7 @@ class FanWriter:
             self.last_pwm = pwm
             return pwm
 
-        assert self.pwm_path is not None
+        assert self.pwm_paths
         assert self.pwm_enable_path is not None
         if not self.manual_enabled:
             write_text(self.pwm_enable_path, "1\n")
@@ -399,7 +413,8 @@ class FanWriter:
                     pwm,
                 )
                 time.sleep(self.decrease_delay)
-            write_text(self.pwm_path, f"{pwm}\n")
+            for path in self.pwm_paths:
+                write_text(path, f"{pwm}\n")
             self.last_pwm = pwm
         return pwm
 
@@ -604,6 +619,24 @@ def score_temperature_candidate(
         yield SensorCandidate("IR", path, ir_score, name, label)
 
 
+def find_pwm_paths(hwmon: Path) -> Tuple[Path, ...]:
+    """Return every pwmN output of the hwmon node, ordered by channel.
+
+    The OMEN fan tables map a sensor temperature to a single firmware fan
+    level that applies to the whole cooling system, so every channel found
+    here is driven with the same PWM value. Machines with a second fan expose
+    pwm2; writing only pwm1 leaves that fan parked at 0 RPM, because putting
+    pwm1_enable into manual mode takes all fans away from firmware control.
+    """
+    channels = []
+    for path in hwmon.glob("pwm[0-9]*"):
+        suffix = path.name[len("pwm") :]
+        if not suffix.isdigit():
+            continue
+        channels.append((int(suffix), path))
+    return tuple(path for _, path in sorted(channels))
+
+
 def find_hp_hwmon() -> Optional[Path]:
     for hwmon in Path("/sys/class/hwmon").glob("hwmon*"):
         if read_optional_text(hwmon / "name") != "hp":
@@ -757,7 +790,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--ir-temp", help="explicit IR/surface temp*_input sysfs path")
     parser.add_argument("--hwmon", help="explicit hp hwmon directory")
-    parser.add_argument("--pwm", help="explicit pwm1 path")
+    parser.add_argument(
+        "--pwm",
+        help="explicit pwm path, or a comma-separated list to drive every fan; "
+        "default: every pwmN channel of the hp hwmon node",
+    )
     parser.add_argument("--pwm-enable", help="explicit pwm1_enable path")
     parser.add_argument(
         "--fan-level-max",
