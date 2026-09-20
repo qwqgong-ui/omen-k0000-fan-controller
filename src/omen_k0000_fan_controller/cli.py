@@ -391,7 +391,11 @@ class FanWriter:
         pwm = max(0, min(pwm, 255))
 
         if self.dry_run:
-            logging.info("dry-run: target level=%s pwm=%s", clamped, pwm)
+            # The live path below only writes when pwm moves; say so on the
+            # same terms rather than restating an unchanged target once per
+            # --interval, which at the default is 86,400 lines a day.
+            if pwm != self.last_pwm:
+                logging.info("dry-run: target level=%s pwm=%s", clamped, pwm)
             self.last_pwm = pwm
             return pwm
 
@@ -456,6 +460,29 @@ class PlatformProfile:
         logging.info("set platform_profile=%s", self.requested)
 
 
+def describe_reading(
+    raw: Mapping[str, float],
+    smoothed: Mapping[str, float],
+    per_sensor: Mapping[str, int],
+    level: int,
+) -> str:
+    """Render one reading, leaving out whatever the line already implies.
+
+    ewma repeats raw once the filter has settled, which at idle is almost
+    every line, and per_sensor repeats target_level whenever no single sensor
+    is driving the curve on its own. Printing either in that state spends
+    about half the record restating a value that is already on it.
+    """
+    raw_fmt = format_float_map(raw)
+    smoothed_fmt = format_float_map(smoothed)
+    parts = [f"raw={raw_fmt}"]
+    if smoothed_fmt != raw_fmt:
+        parts.append(f"ewma={smoothed_fmt}")
+    if any(value != level for value in per_sensor.values()):
+        parts.append(f"per_sensor={dict(per_sensor)}")
+    return " ".join(parts)
+
+
 class Scheduler:
     def __init__(
         self,
@@ -463,14 +490,27 @@ class Scheduler:
         reader: SensorReader,
         writer: FanWriter,
         log_every: int,
+        log_keepalive: float = 900.0,
     ) -> None:
         self.curve = curve
         self.reader = reader
         self.writer = writer
         self.filter = EwmaFilter(curve.lambda_increase, curve.lambda_decrease)
         self.log_every = log_every
+        self.log_keepalive = max(0.0, log_keepalive)
         self.ticks = 0
         self.last_level: Optional[int] = None
+        # Cache of the decision last written to the log. The heartbeat exists
+        # to show what the loop decided, and the decision is (level, pwm) --
+        # the raw temperatures move on every single sample, so gating on them
+        # would let practically every heartbeat through.
+        #
+        # At the defaults (--interval 1, --log-every 10) an unchanged decision
+        # was reprinted every ten seconds: 8,640 lines a day into a journal
+        # capped at 50 MB, which evicts anything worth reading long before
+        # anyone goes looking for it.
+        self.last_logged_decision: Optional[Tuple[int, int]] = None
+        self.last_log_at: Optional[float] = None
 
     def tick(self) -> SensorReading:
         raw = self.reader.read()
@@ -481,17 +521,30 @@ class Scheduler:
         level, per_sensor = self.curve.target_level(smoothed)
         pwm = self.writer.apply_level(level)
 
+        now = time.monotonic()
+        decision = (level, pwm)
         changed = level != self.last_level
-        should_log = changed or self.ticks % self.log_every == 0
-        if should_log:
+        # A heartbeat tick only earns a line when the decision has moved since
+        # the one on the last line; the keepalive covers the long quiet
+        # stretches so silence stays distinguishable from a stalled loop.
+        heartbeat = (
+            self.ticks % self.log_every == 0
+            and decision != self.last_logged_decision
+        )
+        keepalive = (
+            self.log_keepalive > 0
+            and self.last_log_at is not None
+            and now - self.last_log_at >= self.log_keepalive
+        )
+        if changed or heartbeat or keepalive or self.last_log_at is None:
             logging.info(
-                "temps raw=%s ewma=%s per_sensor=%s target_level=%s pwm=%s",
-                format_float_map(raw),
-                format_float_map(smoothed),
-                per_sensor,
+                "temps %s target_level=%s pwm=%s",
+                describe_reading(raw, smoothed, per_sensor, level),
                 level,
                 pwm,
             )
+            self.last_logged_decision = decision
+            self.last_log_at = now
         self.last_level = level
         self.ticks += 1
         return SensorReading(raw=raw, smoothed=smoothed)
@@ -813,6 +866,15 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--ignore-board", action="store_true")
     parser.add_argument("--log-every", type=int, default=10)
+    parser.add_argument(
+        "--log-keepalive",
+        type=float,
+        default=900.0,
+        help=(
+            "seconds of unchanged output after which one line is logged anyway, "
+            "so a quiet loop stays distinguishable from a stalled one (0 disables)"
+        ),
+    )
     parser.add_argument("-v", "--verbose", action="store_true")
     return parser
 
@@ -858,7 +920,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         restore_auto=not args.no_restore_auto,
         decrease_delay=args.decrease_delay,
     )
-    scheduler = Scheduler(curve, reader, writer, log_every=max(1, args.log_every))
+    scheduler = Scheduler(
+        curve,
+        reader,
+        writer,
+        log_every=max(1, args.log_every),
+        log_keepalive=args.log_keepalive,
+    )
 
     stop = False
 
