@@ -8,7 +8,9 @@
 - GPU 默认只在 dGPU 已经 `runtime_status=active` 时读取温度，D3/suspended 时跳过
 - SPD 默认发现 `spd5118` 温度，多个内存温度点取最高值，并且默认 10 秒读取一次
 - 默认加载 `SwFanControlCustomPerformance`
-- 通过 `/sys/class/hwmon/hwmon*/pwm1` 和 `pwm1_enable` 写入风扇档位
+- CPU/GPU 低于 45°C 时只运行 CPU 风扇，目标 1500 RPM（包括 40°C）；45°C 起恢复原双风扇曲线
+- SPD 达到 55°C 或 IR 曲线要求更高转速时恢复双风扇；判定同时检查原始温度和 EWMA，升温越过阈值立即恢复
+- 通过 `/sys/class/hwmon/hwmon*/pwm1`、`pwm2` 和共享的 `pwm1_enable` 写入风扇档位
 - 退出时恢复 `pwm1_enable=2` 自动模式
 
 Linux `hp-wmi` 当前 PWM 模式值：
@@ -81,7 +83,7 @@ sudo omen-k0000-fan-controller --sensors CPU,GPU,SPD --gpu-temp-policy active-on
 SPD 指内存 SPD 温度，不是风扇转速。程序默认读取所有 `spd5118` 温度，取最高值参与决策。建议曲线已经加入默认配置：
 
 ```text
-0C  -> 21
+0C  -> 15
 55C -> 21
 60C -> 24
 65C -> 28
@@ -91,7 +93,9 @@ SPD 指内存 SPD 温度，不是风扇转速。程序默认读取所有 `spd511
 85C -> 58
 ```
 
-低于 55C 时只保持性能配置的基础档位，不会因为内存空闲温度抬高风扇。默认 `--spd-interval 10`，也就是 SPD 温度每 10 秒读取一次；要更低频可以调大这个值。
+低于 55C 时允许低温 1500 RPM 档位，55C 起恢复原 SPD 曲线。默认 `--spd-interval 10`，也就是 SPD 温度每 10 秒读取一次；要更低频可以调大这个值。
+
+1500 RPM 档针对本机 58 档上限补偿 `hp-wmi` 的整数截断，写入 PWM 71，实机已验证 `fan1_input=1500`、`fan2_input=0`。GPU 风扇收到 0 后约十秒停稳；该值由固件处理，实测速率以 `fan*_input` 为准。只有独立 `pwm2` 的内核可以单独停 GPU 风扇；旧内核仅能同时调速。GPU 温度无法发现时仍沿用现有跳过策略，只使用可读温度判断。
 
 ## IR 状态
 

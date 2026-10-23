@@ -33,7 +33,7 @@ class StubWriter:
     def __init__(self) -> None:
         self.pwm = 106
 
-    def apply_level(self, level: int) -> int:
+    def apply_level(self, level: int, single_fan: bool = False) -> int:
         return self.pwm
 
 

@@ -26,6 +26,8 @@ DEFAULT_CONFIG = ROOT / "data/Hendricks_N20E.json"
 DEFAULT_SENSORS = ("CPU", "GPU", "SPD")
 DEFAULT_SPD_INTERVAL = 10.0
 DEFAULT_DECREASE_DELAY = 0.5
+SINGLE_FAN_BELOW_C = 45.0
+QUIET_FAN_LEVEL = 15
 
 PROFILE_TO_JSON_KEY = {
     "default": "SwFanControlCustomDefault",
@@ -35,7 +37,7 @@ PROFILE_TO_JSON_KEY = {
 
 SENSOR_ORDER = ("CPU", "GPU", "SPD", "IR")
 SPD_FAN_TABLE = [
-    (0, 21),
+    (0, QUIET_FAN_LEVEL),
     (55, 21),
     (60, 24),
     (65, 28),
@@ -93,6 +95,19 @@ class FanCurve:
             ),
         }
         profile_max_level = max(level for table in tables.values() for _, level in table)
+        for sensor in ("CPU", "GPU"):
+            table = tables[sensor]
+            # Keep the OEM curve at and above 45 C, including its implicit
+            # first level below the first listed threshold.
+            at_45 = table[0][1]
+            for threshold, level in table:
+                if threshold <= SINGLE_FAN_BELOW_C:
+                    at_45 = level
+            tables[sensor] = [
+                (0.0, QUIET_FAN_LEVEL),
+                (SINGLE_FAN_BELOW_C, at_45),
+                *[(temp, level) for temp, level in table if temp > SINGLE_FAN_BELOW_C],
+            ]
         tables["SPD"] = clamp_level_table(SPD_FAN_TABLE, profile_max_level)
         levels = [level for table in tables.values() for _, level in table]
         throttle_key = (
@@ -325,6 +340,7 @@ class FanWriter:
         self.restore_auto = restore_auto
         self.decrease_delay = max(0.0, decrease_delay)
         self.last_pwm: Optional[int] = None
+        self.last_pwms: Optional[Tuple[int, ...]] = None
         self.manual_enabled = False
 
     @classmethod
@@ -385,18 +401,29 @@ class FanWriter:
             decrease_delay,
         )
 
-    def apply_level(self, level: int) -> int:
+    def apply_level(self, level: int, single_fan: bool = False) -> int:
         clamped = max(0, min(level, self.max_level))
         pwm = round((clamped / self.max_level) * 255) if self.max_level > 0 else 0
         pwm = max(0, min(pwm, 255))
+        if clamped == QUIET_FAN_LEVEL and self.max_level > 0:
+            # hp-wmi converts PWM -> level -> PWM -> level with integer
+            # truncation. One extra level before the first conversion yields
+            # the requested 1500 RPM (PWM 71 with the 58-level table).
+            pwm = min(255, ((clamped + 1) * 255 + self.max_level - 1) // self.max_level)
+        primary = next((path for path in self.pwm_paths if path.name == "pwm1"), None)
+        primary = primary or (self.pwm_paths[0] if self.pwm_paths else None)
+        pwms = tuple(
+            0 if single_fan and path != primary else pwm for path in self.pwm_paths
+        ) or (pwm,)
 
         if self.dry_run:
             # The live path below only writes when pwm moves; say so on the
             # same terms rather than restating an unchanged target once per
             # --interval, which at the default is 86,400 lines a day.
-            if pwm != self.last_pwm:
-                logging.info("dry-run: target level=%s pwm=%s", clamped, pwm)
+            if pwms != self.last_pwms:
+                logging.info("dry-run: target level=%s pwm_channels=%s", clamped, pwms)
             self.last_pwm = pwm
+            self.last_pwms = pwms
             return pwm
 
         assert self.pwm_paths
@@ -404,10 +431,11 @@ class FanWriter:
         if not self.manual_enabled:
             write_text(self.pwm_enable_path, "1\n")
             self.manual_enabled = True
-        if pwm != self.last_pwm:
+        if pwms != self.last_pwms:
             if (
-                self.last_pwm is not None
-                and pwm < self.last_pwm
+                self.last_pwms is not None
+                and any(new < old for new, old in zip(pwms, self.last_pwms))
+                and not any(new > old for new, old in zip(pwms, self.last_pwms))
                 and self.decrease_delay > 0
             ):
                 logging.debug(
@@ -417,9 +445,10 @@ class FanWriter:
                     pwm,
                 )
                 time.sleep(self.decrease_delay)
-            for path in self.pwm_paths:
-                write_text(path, f"{pwm}\n")
+            for path, channel_pwm in zip(self.pwm_paths, pwms):
+                write_text(path, f"{channel_pwm}\n")
             self.last_pwm = pwm
+            self.last_pwms = pwms
         return pwm
 
     def cleanup(self) -> None:
@@ -509,7 +538,8 @@ class Scheduler:
         # was reprinted every ten seconds: 8,640 lines a day into a journal
         # capped at 50 MB, which evicts anything worth reading long before
         # anyone goes looking for it.
-        self.last_logged_decision: Optional[Tuple[int, int]] = None
+        self.last_logged_decision: Optional[Tuple[int, int, bool]] = None
+        self.last_single_fan = False
         self.last_log_at: Optional[float] = None
 
     def tick(self) -> SensorReading:
@@ -519,11 +549,27 @@ class Scheduler:
 
         smoothed = self.filter.update(raw)
         level, per_sensor = self.curve.target_level(smoothed)
-        pwm = self.writer.apply_level(level)
+        # Raw temperatures restart the second fan immediately on crossing
+        # 45 C, even while EWMA still lies below the threshold.
+        single_fan = (
+            "CPU" in raw
+            and level <= QUIET_FAN_LEVEL
+            and all(
+                temp < SINGLE_FAN_BELOW_C
+                for readings in (raw, smoothed)
+                for sensor, temp in readings.items()
+                if sensor != "SPD"
+            )
+            and raw.get("SPD", 0.0) < 55.0
+        )
+        if not single_fan and level <= QUIET_FAN_LEVEL:
+            raw_level, _ = self.curve.target_level(raw)
+            level = max(level, raw_level)
+        pwm = self.writer.apply_level(level, single_fan=single_fan)
 
         now = time.monotonic()
-        decision = (level, pwm)
-        changed = level != self.last_level
+        decision = (level, pwm, single_fan)
+        changed = level != self.last_level or single_fan != self.last_single_fan
         # A heartbeat tick only earns a line when the decision has moved since
         # the one on the last line; the keepalive covers the long quiet
         # stretches so silence stays distinguishable from a stalled loop.
@@ -538,14 +584,16 @@ class Scheduler:
         )
         if changed or heartbeat or keepalive or self.last_log_at is None:
             logging.info(
-                "temps %s target_level=%s pwm=%s",
+                "temps %s target_level=%s pwm=%s single_fan=%s",
                 describe_reading(raw, smoothed, per_sensor, level),
                 level,
                 pwm,
+                single_fan,
             )
             self.last_logged_decision = decision
             self.last_log_at = now
         self.last_level = level
+        self.last_single_fan = single_fan
         self.ticks += 1
         return SensorReading(raw=raw, smoothed=smoothed)
 
@@ -675,11 +723,9 @@ def score_temperature_candidate(
 def find_pwm_paths(hwmon: Path) -> Tuple[Path, ...]:
     """Return every pwmN output of the hwmon node, ordered by channel.
 
-    The OMEN fan tables map a sensor temperature to a single firmware fan
-    level that applies to the whole cooling system, so every channel found
-    here is driven with the same PWM value. Machines with a second fan expose
-    pwm2; writing only pwm1 leaves that fan parked at 0 RPM, because putting
-    pwm1_enable into manual mode takes all fans away from firmware control.
+    All channels must be written when switching between the quiet single-fan
+    policy and the normal dual-fan curve. Older kernels expose only pwm1 and
+    cannot control the two fans independently.
     """
     channels = []
     for path in hwmon.glob("pwm[0-9]*"):
